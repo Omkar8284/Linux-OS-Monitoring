@@ -1,10 +1,5 @@
 ---
-##############################################################################
-# Enterprise Linux Monitoring Playbook
-# Collects: CPU usage %, Memory (MB + %), Per-filesystem disk (GB + %)
-# Output: /etc/ansible/reports/Linux_os_report_<YYYY-MM-DD>.json
-# All numeric values carry their unit suffix inline (MB, GB, %)
-##############################################################################
+
 - name: Enterprise Linux OS Monitoring
   hosts: linux_rfsl,linux_infinxt,linux_root,linux_array,linux_misc
   gather_facts: yes
@@ -15,9 +10,7 @@
 
   tasks:
 
-    # -------------------------------------------------------------------------
     # Ensure output directory exists on the Ansible control node
-    # -------------------------------------------------------------------------
     - name: Ensure report directory exists on control node
       delegate_to: localhost
       run_once: true
@@ -26,10 +19,8 @@
         state: directory
         mode: "0755"
 
-    # -------------------------------------------------------------------------
-    # CPU  –  usage returned as "XX.X%"
-    #         Works on RHEL 7/8/9, Ubuntu, SUSE, CentOS (both Cpu(s) formats)
-    # -------------------------------------------------------------------------
+    # CPU  
+    
     - name: Get CPU usage percent
       shell: >
         top -bn1 | awk '/^%?Cpu/{
@@ -42,9 +33,7 @@
       changed_when: false
       failed_when: false
 
-    # -------------------------------------------------------------------------
-    # Memory  –  sizes as "XXXX MB", percentages as "XX.X%"
-    # -------------------------------------------------------------------------
+    # Memory  –  
     - name: Get memory stats
       shell: >
         free -m | awk 'NR==2{
@@ -55,10 +44,7 @@
       changed_when: false
       failed_when: false
 
-    # -------------------------------------------------------------------------
-    # Disk  –  sizes as "XX.X GB", percentages as "XX.X%"
-    #          One JSON object per real filesystem; virtual FSes excluded
-    # -------------------------------------------------------------------------
+    # Disk  –  
     - name: Get per-filesystem disk usage
       shell: |
         df -PT --exclude-type=tmpfs \
@@ -82,9 +68,8 @@
       changed_when: false
       failed_when: false
 
-    # -------------------------------------------------------------------------
-    # Top 5 CPU-consuming processes  –  cpu_pct as "XX.X%"
-    # -------------------------------------------------------------------------
+
+    # Top 5 CPU-consuming processes  –  
     - name: Get top CPU processes
       shell: >
         ps -eo pid,comm,%cpu --sort=-%cpu --no-headers |
@@ -93,9 +78,7 @@
       changed_when: false
       failed_when: false
 
-    # -------------------------------------------------------------------------
-    # Top 5 memory-consuming processes  –  mem_pct as "XX.X%"
-    # -------------------------------------------------------------------------
+    # Top 5 memory-consuming processes  –  
     - name: Get top memory processes
       shell: >
         ps -eo pid,comm,%mem --sort=-%mem --no-headers |
@@ -104,9 +87,8 @@
       changed_when: false
       failed_when: false
 
-    # -------------------------------------------------------------------------
+    
     # Assemble all collected data into a single host fact
-    # -------------------------------------------------------------------------
     - name: Build server report fact
       set_fact:
         server_report:
@@ -125,9 +107,7 @@
           top_cpu_processes: "{{ top_cpu.stdout_lines | default([]) }}"
           top_mem_processes: "{{ top_mem.stdout_lines | default([]) }}"
 
-    # -------------------------------------------------------------------------
     # Write consolidated JSON report on control node (single file, date-stamped)
-    # -------------------------------------------------------------------------
     - name: Write JSON report to control node
       delegate_to: localhost
       run_once: true
