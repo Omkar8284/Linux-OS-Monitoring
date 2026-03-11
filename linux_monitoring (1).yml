@@ -1,0 +1,184 @@
+---
+##############################################################################
+# Enterprise Linux Monitoring Playbook
+# Collects: CPU usage %, Memory (MB + %), Per-filesystem disk (GB + %)
+# Output: /etc/ansible/reports/Linux_os_report_<YYYY-MM-DD>.json
+# All numeric values carry their unit suffix inline (MB, GB, %)
+##############################################################################
+- name: Enterprise Linux OS Monitoring
+  hosts: linux_rfsl,linux_infinxt,linux_root,linux_array,linux_misc
+  gather_facts: yes
+  strategy: free
+  vars:
+    report_dir: "/etc/ansible/reports"
+    report_file: "Linux_os_report_{{ ansible_date_time.date }}.json"
+
+  tasks:
+
+    # -------------------------------------------------------------------------
+    # Ensure output directory exists on the Ansible control node
+    # -------------------------------------------------------------------------
+    - name: Ensure report directory exists on control node
+      delegate_to: localhost
+      run_once: true
+      file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: "0755"
+
+    # -------------------------------------------------------------------------
+    # CPU  –  usage returned as "XX.X%"
+    #         Works on RHEL 7/8/9, Ubuntu, SUSE, CentOS (both Cpu(s) formats)
+    # -------------------------------------------------------------------------
+    - name: Get CPU usage percent
+      shell: >
+        top -bn1 | awk '/^%?Cpu/{
+          for(i=1;i<=NF;i++) if($i~/id,/) {
+            gsub(/[^0-9.]/,"",$i);
+            printf "%.1f%%", 100-$i; exit
+          }
+        }'
+      register: cpu_usage
+      changed_when: false
+      failed_when: false
+
+    # -------------------------------------------------------------------------
+    # Memory  –  sizes as "XXXX MB", percentages as "XX.X%"
+    # -------------------------------------------------------------------------
+    - name: Get memory stats
+      shell: >
+        free -m | awk 'NR==2{
+          printf "{\"total\":\"%d MB\",\"used\":\"%d MB\",\"free\":\"%d MB\",\"used_pct\":\"%.1f%%\",\"free_pct\":\"%.1f%%\"}",
+          $2, $3, $4, ($3/$2)*100, (($2-$3)/$2)*100
+        }'
+      register: mem_stats
+      changed_when: false
+      failed_when: false
+
+    # -------------------------------------------------------------------------
+    # Disk  –  sizes as "XX.X GB", percentages as "XX.X%"
+    #          One JSON object per real filesystem; virtual FSes excluded
+    # -------------------------------------------------------------------------
+    - name: Get per-filesystem disk usage
+      shell: |
+        df -PT --exclude-type=tmpfs \
+               --exclude-type=devtmpfs \
+               --exclude-type=overlay \
+               --exclude-type=squashfs \
+               --exclude-type=sysfs \
+               --exclude-type=proc \
+               --exclude-type=cgroup \
+               --exclude-type=cgroup2 2>/dev/null | \
+        awk 'NR>1 {
+          used_pct = $6; gsub(/%/, "", used_pct);
+          free_pct = 100 - used_pct;
+          size_gb  = $3 / 1048576;
+          used_gb  = $4 / 1048576;
+          free_gb  = $5 / 1048576;
+          printf "{\"mount\":\"%s\",\"fstype\":\"%s\",\"size\":\"%.1f GB\",\"used\":\"%.1f GB\",\"free\":\"%.1f GB\",\"used_pct\":\"%.1f%%\",\"free_pct\":\"%.1f%%\"}\n",
+          $7, $2, size_gb, used_gb, free_gb, used_pct, free_pct
+        }'
+      register: disk_stats
+      changed_when: false
+      failed_when: false
+
+    # -------------------------------------------------------------------------
+    # Top 5 CPU-consuming processes  –  cpu_pct as "XX.X%"
+    # -------------------------------------------------------------------------
+    - name: Get top CPU processes
+      shell: >
+        ps -eo pid,comm,%cpu --sort=-%cpu --no-headers |
+        awk 'NR<=5{printf "{\"pid\":\"%s\",\"name\":\"%s\",\"cpu_pct\":\"%s%%\"}\n",$1,$2,$3}'
+      register: top_cpu
+      changed_when: false
+      failed_when: false
+
+    # -------------------------------------------------------------------------
+    # Top 5 memory-consuming processes  –  mem_pct as "XX.X%"
+    # -------------------------------------------------------------------------
+    - name: Get top memory processes
+      shell: >
+        ps -eo pid,comm,%mem --sort=-%mem --no-headers |
+        awk 'NR<=5{printf "{\"pid\":\"%s\",\"name\":\"%s\",\"mem_pct\":\"%s%%\"}\n",$1,$2,$3}'
+      register: top_mem
+      changed_when: false
+      failed_when: false
+
+    # -------------------------------------------------------------------------
+    # Assemble all collected data into a single host fact
+    # -------------------------------------------------------------------------
+    - name: Build server report fact
+      set_fact:
+        server_report:
+          hostname:          "{{ ansible_hostname }}"
+          ip:                "{{ inventory_hostname }}"
+          os:                "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+          os_family:         "{{ ansible_os_family }}"
+          kernel:            "{{ ansible_kernel }}"
+          architecture:      "{{ ansible_architecture }}"
+          uptime_seconds:    "{{ ansible_uptime_seconds }}"
+          collection_time:   "{{ ansible_date_time.iso8601 }}"
+          cpu_cores:         "{{ ansible_processor_vcpus }}"
+          cpu_usage:         "{{ cpu_usage.stdout | default('N/A') }}"
+          memory:            "{{ mem_stats.stdout | default('{}') }}"
+          filesystems:       "{{ disk_stats.stdout_lines | default([]) }}"
+          top_cpu_processes: "{{ top_cpu.stdout_lines | default([]) }}"
+          top_mem_processes: "{{ top_mem.stdout_lines | default([]) }}"
+
+    # -------------------------------------------------------------------------
+    # Write consolidated JSON report on control node (single file, date-stamped)
+    # -------------------------------------------------------------------------
+    - name: Write JSON report to control node
+      delegate_to: localhost
+      run_once: true
+      copy:
+        dest: "{{ report_dir }}/{{ report_file }}"
+        content: |
+          {
+            "report_metadata": {
+              "generated_at": "{{ ansible_date_time.iso8601 }}",
+              "report_date": "{{ ansible_date_time.date }}",
+              "total_hosts": {{ ansible_play_hosts | length }},
+              "playbook_version": "2.1"
+            },
+            "servers": [
+          {% for host in ansible_play_hosts %}
+          {% set r = hostvars[host]['server_report'] %}
+              {
+                "hostname":        {{ r.hostname | to_json }},
+                "ip":              {{ r.ip | to_json }},
+                "os":              {{ r.os | to_json }},
+                "os_family":       {{ r.os_family | to_json }},
+                "kernel":          {{ r.kernel | to_json }},
+                "architecture":    {{ r.architecture | to_json }},
+                "uptime_seconds":  {{ r.uptime_seconds | to_json }},
+                "collection_time": {{ r.collection_time | to_json }},
+                "cpu": {
+                  "cores": {{ r.cpu_cores | to_json }},
+                  "usage": {{ r.cpu_usage | to_json }}
+                },
+                "memory": {{ r.memory }},
+                "filesystems": [
+          {% for line in r.filesystems %}
+                  {{ line }}{% if not loop.last %},{% endif %}
+
+          {% endfor %}
+                ],
+                "top_cpu_processes": [
+          {% for p in r.top_cpu_processes %}
+                  {{ p }}{% if not loop.last %},{% endif %}
+
+          {% endfor %}
+                ],
+                "top_mem_processes": [
+          {% for p in r.top_mem_processes %}
+                  {{ p }}{% if not loop.last %},{% endif %}
+
+          {% endfor %}
+                ]
+              }{% if not loop.last %},{% endif %}
+
+          {% endfor %}
+            ]
+          }
+        mode: "0644"
