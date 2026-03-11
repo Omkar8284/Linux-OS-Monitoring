@@ -10,7 +10,7 @@
 
   tasks:
 
-    # Ensure output directory exists on the Ansible control node
+    # Ensure output directory exists on the Ansible control nodes
     - name: Ensure report directory exists on control node
       delegate_to: localhost
       run_once: true
